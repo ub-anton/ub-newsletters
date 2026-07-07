@@ -1,0 +1,96 @@
+name: Publish newsletter
+
+# Trigger: someone drops a raw Braze export into a path like
+#   raw-newsletters/<brand>/<variant>/<YYYY-MM-DD>.html
+# e.g. raw-newsletters/aurora/coupon/2026-07-07.html
+#      raw-newsletters/youbravo/standard/2026-07-07.html
+on:
+  push:
+    branches: [main]
+    paths:
+      - "raw-newsletters/**/**/*.html"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Determine changed files
+        id: changed
+        uses: tj-actions/changed-files@v45
+        with:
+          files: raw-newsletters/**/**/*.html
+
+      - name: Clean each changed newsletter and sync to Webflow
+        shell: bash
+        env:
+          WEBFLOW_TOKEN: ${{ secrets.WEBFLOW_TOKEN }}
+          WEBFLOW_COLLECTION_ID: ${{ secrets.WEBFLOW_COLLECTION_ID }}
+          PAGES_BASE_URL: ${{ vars.PAGES_BASE_URL }}
+        run: |
+          for f in ${{ steps.changed.outputs.all_changed_files }}; do
+            # f looks like: raw-newsletters/aurora/coupon/2026-07-07.html
+            rel="${f#raw-newsletters/}"          # aurora/coupon/2026-07-07.html
+            brand=$(echo "$rel" | cut -d/ -f1)   # aurora
+            variant=$(echo "$rel" | cut -d/ -f2) # coupon
+            date=$(basename "$rel" .html)        # 2026-07-07
+
+            out_dir="docs/newsletters/${brand}/${variant}"
+            mkdir -p "$out_dir"
+
+            # clean_newsletter.py prints each file it wrote, one per line, to stdout
+            written_files=$(python scripts/clean_newsletter.py "$f" "${out_dir}/${date}")
+
+            for cleaned_path in $written_files; do
+              # cleaned_path looks like docs/newsletters/aurora/coupon/2026-07-07-it.html
+              # or docs/newsletters/aurora/coupon/2026-07-07.html if no locale split
+              stem=$(basename "$cleaned_path" .html)
+              if [[ "$stem" == "${date}-"* ]]; then
+                locale="${stem#${date}-}"
+              else
+                locale="default"
+              fi
+              hosted_path="${cleaned_path#docs/}"
+
+              noindex_flag=""
+              if [ "$variant" = "coupon" ]; then
+                noindex_flag="--noindex"
+              fi
+
+              python scripts/sync_webflow.py \
+                --brand "$brand" \
+                --variant "$variant" \
+                --locale "$locale" \
+                --date "$date" \
+                --hosted-path "$hosted_path" \
+                $noindex_flag
+            done
+          done
+
+      - name: Commit cleaned files to docs/ (GitHub Pages source)
+        run: |
+          git config user.name "newsletter-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add docs/newsletters
+          git diff --staged --quiet || git commit -m "Publish cleaned newsletter(s)"
+          git push
+
+# Setup checklist (one-time):
+#   1. Enable GitHub Pages on this repo, source = /docs on main.
+#   2. Add repo secrets: WEBFLOW_TOKEN, WEBFLOW_COLLECTION_ID.
+#   3. Add repo variable: PAGES_BASE_URL (your Pages URL, no trailing slash).
+#   4. In Webflow, create the Newsletters collection with fields:
+#      Brand (Option: Aurora/Youbravo), Variant (Plain text), Locale (Plain text),
+#      Send date (Date), Hosted HTML URL (Link), Summary (Plain text).
+#   5. Drop a raw Braze export into raw-newsletters/<brand>/<variant>/<date>.html
+#      and push to main.
