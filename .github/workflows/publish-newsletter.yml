@@ -83,6 +83,7 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add docs/newsletters
           git diff --staged --quiet || git commit -m "Publish cleaned newsletter(s)"
+          git pull --rebase origin main
           git push
 
 # Setup checklist (one-time):
