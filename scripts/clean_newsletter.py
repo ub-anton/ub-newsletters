@@ -100,6 +100,36 @@ def strip_tracking_params(html: str) -> str:
     return re.sub(r"[?&]lid=[a-z0-9]+", "", html, flags=re.IGNORECASE)
 
 
+RESIZE_REPORTER_SCRIPT = """
+<script>
+(function () {
+  function sendHeight() {
+    var h = document.body.scrollHeight;
+    window.parent.postMessage({ type: "newsletter-resize", height: h }, "*");
+  }
+  window.addEventListener("load", sendHeight);
+  window.addEventListener("resize", sendHeight);
+  if (window.ResizeObserver) {
+    new ResizeObserver(sendHeight).observe(document.body);
+  } else {
+    setInterval(sendHeight, 500);
+  }
+  sendHeight();
+})();
+</script>
+"""
+
+
+def add_resize_reporter(html: str) -> str:
+    """Inject a small script that reports the iframe's real height to its
+    parent via postMessage -- required because the newsletter is hosted on
+    a different origin (GitHub Pages) than the Webflow page embedding it,
+    so the parent page can't just reach in and read scrollHeight directly."""
+    if "</body>" in html:
+        return html.replace("</body>", RESIZE_REPORTER_SCRIPT + "</body>", 1)
+    return html + RESIZE_REPORTER_SCRIPT
+
+
 def minify_whitespace(html: str) -> str:
     html = re.sub(r">\s+<", "><", html)
     html = re.sub(r"[ \t]+", " ", html)
@@ -110,6 +140,7 @@ def clean_resolved(html: str) -> str:
     """Apply MSO/VML/tracking/whitespace cleanup to an already locale-resolved HTML string."""
     html = strip_mso_and_vml(html)
     html = strip_tracking_params(html)
+    html = add_resize_reporter(html)
     html = minify_whitespace(html)
     return html
 
