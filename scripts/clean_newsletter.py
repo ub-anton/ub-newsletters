@@ -136,8 +136,45 @@ def minify_whitespace(html: str) -> str:
     return html
 
 
+def remove_duplicate_logo(html: str) -> str:
+    """Strip the Unobravo logo row (and the spacer row right after it) from
+    the top of the newsletter, since the Webflow page embedding this already
+    has its own header with the same logo -- leaving it in doubles it up.
+
+    Identifies the logo row by content signature (an image_block linking to
+    unobravo.com) rather than by row number, since which literal row-N class
+    ends up first depends on which locale branch got kept. Only touches the
+    very first row of the document and, if present, the row immediately
+    after it -- won't remove anything further down even if similar-looking
+    blocks appear later in the newsletter body.
+    """
+    row_starts = find_row_starts(html)
+    if not row_starts:
+        return html
+
+    def row_span(i: int) -> str:
+        end = row_starts[i + 1] if i + 1 < len(row_starts) else len(html)
+        return html[row_starts[i]:end]
+
+    first_row = row_span(0)
+    is_logo_row = (
+        "image_block" in first_row
+        and "unobravo.com" in first_row
+    )
+    if not is_logo_row:
+        return html
+
+    rows_to_drop = 1
+    if len(row_starts) > 1 and "spacer_block" in row_span(1) and "image_block" not in row_span(1):
+        rows_to_drop = 2
+
+    cutoff = row_starts[rows_to_drop] if len(row_starts) > rows_to_drop else len(html)
+    return html[:row_starts[0]] + html[cutoff:]
+
+
 def clean_resolved(html: str) -> str:
     """Apply MSO/VML/tracking/whitespace cleanup to an already locale-resolved HTML string."""
+    html = remove_duplicate_logo(html)
     html = strip_mso_and_vml(html)
     html = strip_tracking_params(html)
     html = add_resize_reporter(html)
