@@ -84,20 +84,6 @@ def upsert_item(args):
 
     payload = {"isArchived": False, "isDraft": False, "fieldData": field_data}
 
-    if args.noindex:
-        # TODO: replace this with the real field once verified (see Part B, step 6
-        # of the setup doc). Toggle "Search engine indexing" off on one item by hand
-        # in the Webflow UI, then GET that item via the API and see what key changed
-        # -- it's likely a top-level flag alongside isDraft/isArchived, e.g.
-        # "isIndexable": False, or nested like "seo": {"noIndex": True}. Whatever it
-        # turns out to be, set it into `payload` here, not into `field_data`.
-        print(
-            "WARNING: --noindex was passed but the API field isn't wired up yet "
-            "-- this item will publish normally without a noindex tag. "
-            "See the TODO in sync_webflow.py.",
-            file=sys.stderr,
-        )
-
     existing = find_existing_item(collection_id, token, slug)
 
     if existing:
@@ -114,7 +100,50 @@ def upsert_item(args):
         print(f"Webflow API error {resp.status_code}: {resp.text}", file=sys.stderr)
         resp.raise_for_status()
 
+    item = resp.json()
+    item_id = existing["id"] if existing else item.get("id")
+
     print(f"{action} CMS item '{slug}' -> {hosted_url}")
+
+    if args.noindex and item_id:
+        set_sitemap_exclusion(token, collection_id, item_id)
+
+
+def set_sitemap_exclusion(token: str, collection_id: str, item_id: str) -> None:
+    """Best-effort call to Webflow's Sitemap API to exclude this item from search
+    engines (used for the coupon variant). This is a genuinely separate API surface
+    from the CMS Items endpoint above -- confirmed via Webflow's own MCP connector,
+    which exposes update_item_sitemap_status/includeInSitemap for exactly this. The
+    connector describes it as living under a "/beta" namespace but doesn't expose the
+    literal REST path, so the URL below is inferred from Webflow's usual REST
+    conventions and NOT confirmed against public docs.
+
+    Deliberately non-fatal: if this guess is wrong, log it clearly and move on --
+    the actual newsletter publish above must not fail over a nice-to-have SEO flag.
+    """
+    url = f"https://api.webflow.com/beta/collections/{collection_id}/items/{item_id}/sitemap"
+    try:
+        resp = requests.patch(
+            url,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"includeInSitemap": False},
+            timeout=10,
+        )
+        if resp.ok:
+            print(f"Excluded item {item_id} from sitemap (noindex)")
+        else:
+            print(
+                f"NOINDEX WARNING: sitemap API call failed ({resp.status_code}: {resp.text}). "
+                f"The newsletter itself published fine -- this item just wasn't excluded from "
+                f"search engines. Toggle it manually in Webflow, or fix the endpoint path above.",
+                file=sys.stderr,
+            )
+    except requests.RequestException as e:
+        print(
+            f"NOINDEX WARNING: sitemap API call raised {e}. "
+            f"The newsletter itself published fine -- toggle indexing manually if needed.",
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -128,9 +157,9 @@ def main():
     parser.add_argument("--summary", default=None)
     parser.add_argument(
         "--noindex", action="store_true",
-        help="Mark this item to be excluded from search engines (e.g. coupon variant). "
-             "See the TODO in upsert_item() -- the exact API field name needs a one-time "
-             "manual verification against your site before this flag actually does anything.",
+        help="Best-effort: exclude this item from search engines via Webflow's Sitemap "
+             "API (see set_sitemap_exclusion() -- endpoint path is unconfirmed, fails "
+             "safely if wrong).",
     )
     args = parser.parse_args()
     upsert_item(args)
