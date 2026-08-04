@@ -55,10 +55,12 @@ def build_slug(brand: str, variant: str, locale: str, date: str) -> str:
 
 
 def build_name(brand: str, variant: str, locale: str, date: str) -> str:
-    label = brand.capitalize()
-    if variant and variant.lower() != "standard":
-        label += f" ({variant.capitalize()})"
-    return f"{label} newsletter - {date} - {locale.upper()}"
+    label = f"{date} · {brand.capitalize()}"
+    if variant and variant.lower() not in ("standard",):
+        label += f" · {variant.capitalize()}"
+    if locale and locale.lower() != "it":
+        label += f" · {locale.upper()}"
+    return label
 
 
 def upsert_item(args):
