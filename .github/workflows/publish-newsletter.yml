@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "raw-newsletters/**/**/*.html"
+      - "raw-newsletters/*/*/*.html"
 
 jobs:
   publish:
@@ -29,7 +29,7 @@ jobs:
         id: changed
         uses: tj-actions/changed-files@v45
         with:
-          files: raw-newsletters/**/**/*.html
+          files: raw-newsletters/*/*/*.html
 
       - name: Clean each changed newsletter and sync to Webflow
         shell: bash
