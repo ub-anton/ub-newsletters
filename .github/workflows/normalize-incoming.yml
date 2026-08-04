@@ -1,0 +1,65 @@
+name: Normalize incoming Braze export
+
+# Trigger: marketing drops a file with its native Braze export name into
+# raw-newsletters/incoming/ -- no renaming needed on their end.
+# This workflow parses the filename, moves the file into our
+# brand/variant/date convention, and commits that move. The commit this
+# produces then triggers the existing "Publish newsletter" workflow
+# automatically, since it touches raw-newsletters/**/**/*.html.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "raw-newsletters/incoming/*.html"
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Determine changed files
+        id: changed
+        uses: tj-actions/changed-files@v45
+        with:
+          files: raw-newsletters/incoming/*.html
+
+      - name: Move each file into brand/variant/date convention
+        shell: bash
+        run: |
+          any_moved=false
+          for f in ${{ steps.changed.outputs.all_changed_files }}; do
+            filename=$(basename "$f")
+            dest=$(python scripts/normalize_filename.py "$filename") || {
+              echo "::error file=$f::Could not parse Braze filename '$filename' -- left in place, needs manual attention. $dest"
+              continue
+            }
+            mkdir -p "$(dirname "$dest")"
+            git mv "$f" "$dest"
+            echo "Moved $f -> $dest"
+            any_moved=true
+          done
+          echo "any_moved=$any_moved" >> "$GITHUB_ENV"
+
+      - name: Commit the move
+        if: env.any_moved == 'true'
+        run: |
+          git config user.name "newsletter-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git diff --staged --quiet || git commit -m "Normalize incoming Braze export(s)"
+          git pull --rebase origin main
+          git push
+
+# Setup checklist (one-time):
+#   1. Create raw-newsletters/incoming/.gitkeep so the folder exists.
+#   2. Tell marketing: drop native Braze exports straight into
+#      raw-newsletters/incoming/, no renaming. Everything after that is automatic.
+#   3. If a file fails to parse (unrecognized filename shape or unknown brand),
+#      it's left in incoming/ untouched and the Action run shows a clear error --
+#      check the Actions tab if a newsletter doesn't show up as expected.
