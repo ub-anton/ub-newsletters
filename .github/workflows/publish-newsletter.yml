@@ -48,8 +48,13 @@ jobs:
             out_dir="docs/newsletters/${brand}/${variant}"
             mkdir -p "$out_dir"
 
-            # clean_newsletter.py prints each file it wrote, one per line, to stdout
-            written_files=$(python scripts/clean_newsletter.py "$f" "${out_dir}/${date}")
+            # clean_newsletter.py prints each file it wrote, one per line, to stdout.
+            # A failure here (bad HTML, unexpected structure, etc.) shouldn't take
+            # down the rest of the batch -- log it and move to the next file.
+            if ! written_files=$(python scripts/clean_newsletter.py "$f" "${out_dir}/${date}"); then
+              echo "::error file=$f::Cleaning failed -- skipping this file, rest of batch continues"
+              continue
+            fi
 
             for cleaned_path in $written_files; do
               # cleaned_path looks like docs/newsletters/aurora/coupon/2026-07-07-it.html
@@ -67,13 +72,19 @@ jobs:
                 noindex_flag="--noindex"
               fi
 
-              python scripts/sync_webflow.py \
+              # Same principle here: if the Webflow sync fails for this one item
+              # (API hiccup, bad slug, whatever), log it and keep going -- the
+              # cleaned file still gets committed below either way, so a retry
+              # later just needs to re-run the sync, not redo everything.
+              if ! python scripts/sync_webflow.py \
                 --brand "$brand" \
                 --variant "$variant" \
                 --locale "$locale" \
                 --date "$date" \
                 --hosted-path "$hosted_path" \
-                $noindex_flag
+                $noindex_flag; then
+                echo "::error file=$f::Webflow sync failed for $cleaned_path -- file is cleaned and will still be committed/published, but has no CMS item yet. Re-run sync_webflow.py for this one manually or retry."
+              fi
             done
           done
 
