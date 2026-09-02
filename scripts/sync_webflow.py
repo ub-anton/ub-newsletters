@@ -72,13 +72,21 @@ def upsert_item(args):
     slug = build_slug(args.brand, args.variant, args.locale, args.date)
     name = build_name(args.brand, args.variant, args.locale, args.date)
 
+    # args.date is normally a clean YYYY-MM-DD, but can arrive as
+    # YYYY-MM-DD-2, -3, etc. when the normalize workflow disambiguated two
+    # sends landing on the same date. Webflow's actual Date field needs a
+    # real calendar date -- the first 10 characters always are one,
+    # regardless of any suffix. The suffix stays in the slug/name above,
+    # which is what actually needs to be unique.
+    calendar_date = args.date[:10]
+
     field_data = {
         "name": name,
         "slug": slug,
         "brand": args.brand.capitalize(),
         "variant": args.variant.capitalize(),
         "locale": args.locale.upper(),
-        "send-date": f"{args.date}T00:00:00.000Z",
+        "send-date": f"{calendar_date}T00:00:00.000Z",
         "hosted-html-url": hosted_url,
     }
     if args.summary:
