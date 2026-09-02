@@ -42,10 +42,29 @@ jobs:
               echo "::error file=$f::Could not parse Braze filename '$filename' -- left in place, needs manual attention. $dest"
               continue
             }
+
+            # Disambiguate if the destination already exists -- e.g. two
+            # sends land on the same date. Appends -2, -3, etc. to the date
+            # portion before .html until a free path is found. This check
+            # runs against the actual working tree, so it correctly handles
+            # multiple collisions within the same batch as files get moved.
+            if [ -e "$dest" ]; then
+              base="${dest%.html}"
+              n=2
+              while [ -e "${base}-${n}.html" ]; do
+                n=$((n + 1))
+              done
+              echo "NOTE: $dest already exists (another send on the same date) -- using ${base}-${n}.html instead"
+              dest="${base}-${n}.html"
+            fi
+
             mkdir -p "$(dirname "$dest")"
-            git mv "$f" "$dest"
-            echo "Moved $f -> $dest"
-            any_moved=true
+            if git mv "$f" "$dest"; then
+              echo "Moved $f -> $dest"
+              any_moved=true
+            else
+              echo "::error file=$f::git mv failed unexpectedly -- left in place, skipping to next file"
+            fi
           done
           echo "any_moved=$any_moved" >> "$GITHUB_ENV"
 
