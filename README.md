@@ -10,7 +10,7 @@
 
 
 
-3. Drag and drop the html files to the URL below and hit Commit:
+3. Drag and drop the html files to the URL below and hit 'Commit changes' button:
    
    https://github.com/ub-anton/ub-newsletters/upload/main/raw-newsletters/incoming/
 
