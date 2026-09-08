@@ -1,29 +1,14 @@
-# Newsletter publishing pipeline
+# Newsletter publishing automation
 
-Drop a raw Braze export into the matching folder and push to `main` —
-GitHub Actions cleans it, publishes it to GitHub Pages, and syncs it to
-the Webflow "Newsletters" CMS Collection automatically.
+1. Export the newsletter files from Braze in the following format:
+   Youbravo: `20260519_IT_TP_BLAST_Youbravo#11_20260522111325.html`
+   Aurora: `20260415_IT_PT_NEWSLETTER_AURORA_#1_No_Coupon_20260522113851.html`
 
-## Where to drop files
+2. Drag and drop the html files here:
+   https://github.com/ub-anton/ub-newsletters/upload/main/raw-newsletters/incoming/
 
-```
-raw-newsletters/aurora/coupon/2026-07-07.html      (Aurora, with coupon)
-raw-newsletters/aurora/standard/2026-07-07.html    (Aurora, no coupon)
-raw-newsletters/youbravo/standard/2026-07-07.html  (Youbravo)
-```
+3. After a few minutes, check Webflow page:
+   Youbravo: https://www.unobravo.com/newsletters/youbravo-standard-2026-08-25-it
+   Aurora: https://www.unobravo.com/newsletters/aurora-standard-2026-04-28-it
 
-Name the file by send date (`YYYY-MM-DD.html`). The folder it sits in is
-what tells the pipeline the brand and variant -- no other config needed
-per send.
-
-## One-time setup still required after uploading this repo
-
-See the setup checklist at the bottom of
-`.github/workflows/publish-newsletter.yml`, and the full walkthrough
-from the chat that generated this repo, covering:
-
-1. Enabling GitHub Pages (Settings -> Pages -> Deploy from branch -> /docs)
-2. Creating the Webflow "Newsletters" CMS Collection with the right fields
-3. Adding repo secrets: `WEBFLOW_TOKEN`, `WEBFLOW_COLLECTION_ID`
-4. Adding repo variable: `PAGES_BASE_URL`
-5. Wiring up the noindex field (see the TODO in `scripts/sync_webflow.py`)
+   Note: If they don't appear after 30 minutes, contact antonwade@unobravo.com
