@@ -8,9 +8,12 @@ What it does:
      "row" table, so we find row boundaries and keep only the branch we want).
   2. Strips Outlook/MSO-only markup: conditional comments, VML blocks,
      xmlns:v / xmlns:o namespaces, and mso-* inline CSS properties.
-  3. Strips Braze per-recipient tracking params (lid=...) from links,
+  3. Removes unresolved Braze content-block references
+     ({{content_blocks.${...}}}), which Braze does not inline on export and
+     which would otherwise render as literal text in the hosted archive.
+  4. Strips Braze per-recipient tracking params (lid=...) from links,
      since a public web page has no subscriber context.
-  4. Collapses excess whitespace between tags.
+  5. Collapses excess whitespace between tags.
 
 Usage:
   python clean_newsletter.py input.html output_stem
@@ -27,6 +30,7 @@ Usage:
 import argparse
 import re
 import sys
+from html import unescape
 
 
 ROW_RE = re.compile(r'<table class="row row-\d+"')
@@ -172,10 +176,121 @@ def remove_duplicate_logo(html: str) -> str:
     return html[:row_starts[0]] + html[cutoff:]
 
 
+CONTENT_BLOCK_RE = re.compile(
+    r"\{\{\s*content_blocks\s*\.\s*(?:\$\{[^{}]*\}|[\w.\-]+)[^{}]*\}\}",
+    re.IGNORECASE,
+)
+TABLE_TAG_RE = re.compile(r"<\s*(/?)\s*table\b", re.IGNORECASE)
+# Deliberately more tolerant than ROW_RE above: Braze wraps some rows with extra
+# classes ("row row-9 mobile_hide") and its export sometimes breaks the line
+# between <table and class=, both of which ROW_RE misses. ROW_RE is left alone
+# so the logo/locale logic keeps behaving exactly as it does today.
+ROW_TABLE_RE = re.compile(r'<table\b[^>]*class="[^"]*\brow-\d+\b[^"]*"', re.IGNORECASE)
+VISIBLE_TAG_RE = re.compile(
+    r"<\s*(?:img|picture|svg|video|audio|iframe|embed|object|input|button)\b",
+    re.IGNORECASE,
+)
+# Zero-width characters str.strip() does not remove (&nbsp; and hair spaces it does).
+ZERO_WIDTH = str.maketrans({c: None for c in "\u200b\u200c\u200d\u2060\ufeff"})
+
+
+def table_span_end(html: str, start: int) -> int:
+    """Index just past the </table> that closes the <table> opening at `start`."""
+    depth = 0
+    for match in TABLE_TAG_RE.finditer(html, start):
+        depth += -1 if match.group(1) else 1
+        if depth == 0:
+            close = html.find(">", match.end())
+            return len(html) if close == -1 else close + 1
+    return len(html)
+
+
+def row_spans(html: str):
+    """(start, end) of every top-level row table, in document order."""
+    spans = []
+    for match in ROW_TABLE_RE.finditer(html):
+        start = match.start()
+        if spans and start < spans[-1][1]:
+            continue  # nested inside a row we already captured
+        spans.append((start, table_span_end(html, start)))
+    return spans
+
+
+def row_is_visually_empty(row_html: str) -> bool:
+    """True if a row renders nothing a reader can see: spacers, hairline dividers."""
+    if VISIBLE_TAG_RE.search(row_html):
+        return False
+    text = re.sub(r"<!--.*?-->", " ", row_html, flags=re.DOTALL)
+    text = re.sub(r"<(script|style)\b.*?</\1\s*>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = unescape(re.sub(r"<[^>]*>", " ", text))
+    return not text.translate(ZERO_WIDTH).strip()
+
+
+def remove_content_block_rows(html: str, max_trailing_rows: int = 3) -> str:
+    """Strip unresolved Braze content-block references, e.g.
+
+        {{content_blocks.${TP_Footer_app_donwload_cream} | id: 'cb3'}}
+
+    Braze template exports do not inline referenced content blocks, so the
+    placeholder survives into the export and renders as literal text in the
+    hosted archive (the shared footer blocks are the usual offenders).
+
+    A row whose only content was the placeholder is dropped entirely -- leaving
+    it behind would render an empty band. A row that has other content keeps
+    everything else and loses just the placeholder. Any divider or spacer row
+    left dangling at the very bottom afterwards (a hairline with nothing under
+    it) is dropped too, up to `max_trailing_rows`.
+    """
+    if not CONTENT_BLOCK_RE.search(html):
+        return html
+
+    spans = row_spans(html)
+    if not spans:
+        return CONTENT_BLOCK_RE.sub("", html)
+
+    # Slice the document into row tables and the bits between them. Only row
+    # segments are ever dropped; everything else (document head, closing
+    # wrapper tags) is passed through untouched.
+    segments = [(html[:spans[0][0]], False)]
+    for i, (start, end) in enumerate(spans):
+        segments.append((html[start:end], True))
+        next_start = spans[i + 1][0] if i + 1 < len(spans) else len(html)
+        if next_start > end:
+            segments.append((html[end:next_start], False))
+
+    kept, dropped = [], 0
+    for text, is_row in segments:
+        if is_row and CONTENT_BLOCK_RE.search(text):
+            stripped = CONTENT_BLOCK_RE.sub("", text)
+            if row_is_visually_empty(stripped):
+                dropped += 1
+                continue
+            text = stripped
+        kept.append((text, is_row))
+
+    for _ in range(max_trailing_rows if dropped else 0):
+        last_row = None
+        for i in range(len(kept) - 1, -1, -1):
+            text, is_row = kept[i]
+            if is_row:
+                last_row = i
+                break
+            if not row_is_visually_empty(text):
+                break  # real content sits below the last row, leave it alone
+        if last_row is None or not row_is_visually_empty(kept[last_row][0]):
+            break
+        kept.pop(last_row)
+
+    # Belt and braces: catch placeholders outside any row table (preheader text,
+    # href attributes) that the row pass would not have seen.
+    return CONTENT_BLOCK_RE.sub("", "".join(text for text, _ in kept))
+
+
 def clean_resolved(html: str) -> str:
     """Apply MSO/VML/tracking/whitespace cleanup to an already locale-resolved HTML string."""
     html = remove_duplicate_logo(html)
     html = strip_mso_and_vml(html)
+    html = remove_content_block_rows(html)
     html = strip_tracking_params(html)
     html = add_resize_reporter(html)
     html = minify_whitespace(html)
