@@ -1,0 +1,98 @@
+name: Re-clean all newsletters
+
+# Manual only. Run this after changing scripts/clean_newsletter.py: it re-runs
+# the cleaner over every raw Braze export in the repo and rewrites docs/ so the
+# published archive matches the current cleaning logic.
+#
+# Leave "Preview only" ticked for a first pass -- it reports exactly which files
+# would change and commits nothing. Untick it to actually publish.
+#
+# Deliberately does NOT touch Webflow: the hosted URLs don't change, so every
+# CMS item and embed stays valid as it is.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview only (report changes, commit nothing)"
+        type: boolean
+        default: true
+
+jobs:
+  reclean:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Re-clean every raw export
+        shell: bash
+        run: |
+          shopt -s nullglob
+          total=0
+          failed=0
+          for f in raw-newsletters/*/*/*.html; do
+            # f looks like: raw-newsletters/youbravo/standard/2026-06-09.html
+            rel="${f#raw-newsletters/}"
+            brand=$(echo "$rel" | cut -d/ -f1)
+            variant=$(echo "$rel" | cut -d/ -f2)
+            date=$(basename "$rel" .html)
+
+            out_dir="docs/newsletters/${brand}/${variant}"
+            mkdir -p "$out_dir"
+            total=$((total + 1))
+
+            # Same non-fatal handling as the publish workflow: a file that won't
+            # clean is logged and skipped, its currently published version is
+            # left untouched, and the rest of the batch carries on.
+            if ! python scripts/clean_newsletter.py "$f" "${out_dir}/${date}" >/dev/null; then
+              echo "::error file=$f::Cleaning failed -- published version left as-is, rest of batch continues"
+              failed=$((failed + 1))
+            fi
+          done
+          echo "Re-cleaned $total raw export(s), $failed failure(s)."
+          echo "RECLEAN_TOTAL=$total" >> "$GITHUB_ENV"
+          echo "RECLEAN_FAILED=$failed" >> "$GITHUB_ENV"
+
+      - name: Report what changed
+        shell: bash
+        run: |
+          git add -A docs/newsletters
+          {
+            echo "## Re-clean report"
+            echo
+            echo "Raw exports processed: **${RECLEAN_TOTAL}** (failures: ${RECLEAN_FAILED})"
+            echo
+            if git diff --staged --quiet; then
+              echo "No changes -- the published archive already matches the current cleaner."
+            else
+              echo "### Published files that will change"
+              echo '```'
+              git diff --staged --stat
+              echo '```'
+            fi
+            set +e
+            leftover=$(grep -rl 'content_blocks\.' docs/newsletters | wc -l)
+            set -e
+            echo
+            echo "Files still containing an unresolved Braze content block: **${leftover}**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit and publish
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        run: |
+          git config user.name "newsletter-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A docs/newsletters
+          if git diff --staged --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "Re-clean published newsletters with current cleaner"
+          git pull --rebase origin main
+          git push
