@@ -3,84 +3,145 @@ name: Normalize incoming Braze export
 # Trigger: marketing drops a file with its native Braze export name into
 # raw-newsletters/incoming/ -- no renaming needed on their end.
 # This workflow parses the filename, moves the file into our
-# brand/variant/date convention, and commits that move. The commit this
-# produces then triggers the existing "Publish newsletter" workflow
-# automatically, since it touches raw-newsletters/**/**/*.html.
+# brand/variant/date convention, commits that move, and then explicitly
+# starts the "Publish newsletter" workflow for the moved file(s).
+#
+# Why the explicit trigger: pushes made with the built-in GITHUB_TOKEN don't
+# start other workflows, but a workflow_dispatch call made with it does.
+# GITHUB_TOKEN is created fresh for every run, so there is no personal access
+# token to expire or renew.
+#
+# Run it manually (Actions -> Normalize incoming Braze export -> Run workflow)
+# to sweep everything currently sitting in raw-newsletters/incoming/ -- useful
+# after a failed run, since files that fail are left there untouched.
 on:
   push:
     branches: [main]
     paths:
       - "raw-newsletters/incoming/*.html"
+  workflow_dispatch:
 
 jobs:
   normalize:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write   # commit the move
+      actions: write    # start the publish workflow
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.NEWSLETTER_BOT_PAT }}
+          fetch-depth: 0   # needed to diff against the previous commit
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Determine changed files
-        id: changed
-        uses: tj-actions/changed-files@v45
-        with:
-          files: raw-newsletters/incoming/*.html
+      - name: List files to process
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+        run: |
+          # One path per line in files.txt. Handles names with spaces.
+          : > files.txt
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            find raw-newsletters/incoming -maxdepth 1 -type f -name '*.html' | sort > files.txt
+          else
+            if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+              BEFORE="$SHA~1"
+            fi
+            git diff --name-only --diff-filter=AMR -z "$BEFORE" "$SHA" -- 'raw-newsletters/incoming/*.html' \
+              | tr '\0' '\n' | sort > files.txt
+          fi
+          echo "Files to process:"
+          cat files.txt
 
       - name: Move each file into brand/variant/date convention
         shell: bash
         run: |
-          any_moved=false
-          for f in ${{ steps.changed.outputs.all_changed_files }}; do
+          : > moved.txt
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ -f "$f" ] || { echo "Skipping $f (no longer exists)"; continue; }
             filename=$(basename "$f")
-            dest=$(python scripts/normalize_filename.py "$filename") || {
+
+            if ! dest=$(python scripts/normalize_filename.py "$filename" 2>&1 < /dev/null); then
               echo "::error file=$f::Could not parse Braze filename '$filename' -- left in place, needs manual attention. $dest"
               continue
-            }
+            fi
 
-            # Disambiguate if the destination already exists -- e.g. two
-            # sends land on the same date. Appends -2, -3, etc. to the date
-            # portion before .html until a free path is found. This check
-            # runs against the actual working tree, so it correctly handles
-            # multiple collisions within the same batch as files get moved.
+            # Date collisions are rejected, not auto-suffixed: two exports
+            # landing on the same brand/variant/date usually means a duplicate
+            # or a wrong date upstream, and a silent -2 file hides that.
             if [ -e "$dest" ]; then
-              base="${dest%.html}"
-              n=2
-              while [ -e "${base}-${n}.html" ]; do
-                n=$((n + 1))
-              done
-              echo "NOTE: $dest already exists (another send on the same date) -- using ${base}-${n}.html instead"
-              dest="${base}-${n}.html"
+              echo "::error file=$f::$dest already exists -- left in incoming/. If this is a duplicate export, delete it; if it's a genuinely different send, rename the existing file or fix the date, then re-run this workflow."
+              continue
             fi
 
             mkdir -p "$(dirname "$dest")"
             if git mv "$f" "$dest"; then
               echo "Moved $f -> $dest"
-              any_moved=true
+              echo "$dest" >> moved.txt
             else
               echo "::error file=$f::git mv failed unexpectedly -- left in place, skipping to next file"
             fi
-          done
-          echo "any_moved=$any_moved" >> "$GITHUB_ENV"
+          done < files.txt
 
       - name: Commit the move
-        if: env.any_moved == 'true'
+        id: commit
+        shell: bash
         run: |
+          if [ ! -s moved.txt ]; then
+            echo "Nothing moved."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git config user.name "newsletter-bot"
           git config user.email "actions@users.noreply.github.com"
-          git diff --staged --quiet || git commit -m "Normalize incoming Braze export(s)"
-          git pull --rebase origin main
-          git push
+          git commit -m "Normalize incoming Braze export(s)"
+
+          # Retry in case another run pushed in the meantime.
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Push attempt $i failed, retrying..."
+            sleep $((i * 5))
+          done
+          echo "::error::Could not push the move after 5 attempts"
+          exit 1
+
+      - name: Start publish workflow
+        if: steps.commit.outputs.pushed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # One publish run for the whole batch, so runs can't race each other.
+          paths=$(paste -sd' ' moved.txt)
+          echo "Publishing: $paths"
+          gh workflow run publish-newsletter.yml --ref main -f paths="$paths"
+
+      - name: Fail if any file was left behind
+        if: always()
+        shell: bash
+        run: |
+          left=0
+          while IFS= read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] && left=$((left + 1))
+          done < files.txt
+          if [ "$left" -gt 0 ]; then
+            echo "::error::$left file(s) left in raw-newsletters/incoming/ -- see errors above"
+            exit 1
+          fi
 
 # Setup checklist (one-time):
 #   1. Create raw-newsletters/incoming/.gitkeep so the folder exists.
 #   2. Tell marketing: drop native Braze exports straight into
 #      raw-newsletters/incoming/, no renaming. Everything after that is automatic.
-#   3. If a file fails to parse (unrecognized filename shape or unknown brand),
-#      it's left in incoming/ untouched and the Action run shows a clear error --
-#      check the Actions tab if a newsletter doesn't show up as expected.
+#   3. If a file fails to parse or collides with an existing date, it's left in
+#      incoming/ untouched and the run goes red with a clear error. Fix the
+#      cause, then use "Run workflow" to sweep incoming/ again.
+#   4. If main has branch protection or a ruleset, allow GitHub Actions to push.
